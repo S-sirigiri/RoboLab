@@ -7,7 +7,8 @@ persisted per-env log files, HDF5-derived trajectory metrics, and aggregated
 
 Lives in ``robolab.eval`` because it's tightly coupled to the eval loop: it
 consumes exactly what ``run_episode`` emits and writes results to the same
-``scene_output_dir`` layout that ``run_eval.py`` and its variants share.
+``scene_output_dir`` layout that ``run_eval.py`` and its variants share,
+including per-env end-effector XY trajectory plots.
 """
 
 import os
@@ -23,6 +24,7 @@ from robolab.core.logging.results import (
 from robolab.core.metrics import compute_episode_metrics, load_demo_data
 from robolab.core.task.status import EVENT_STATUS_CODES, StatusCode, get_status_name
 from robolab.core.utils.file_utils import load_file
+from robolab.core.utils.plot_utils import plot_ee_path_xy
 
 
 def split_msgs_per_env(
@@ -155,6 +157,28 @@ def build_run_summary(
     return summary
 
 
+def save_ee_path_xy_plot(
+    *,
+    traj_data: dict | None,
+    task_env: str,
+    run_idx: int,
+    env_id: int,
+    scene_output_dir: str,
+) -> str | None:
+    """Save a top-down XY projection of the recorded end-effector trajectory."""
+    if not traj_data:
+        return None
+
+    ee_position = traj_data.get("ee_position")
+    if ee_position is None or len(ee_position) == 0:
+        return None
+
+    image_path = os.path.join(scene_output_dir, f"ee_path_xy_{run_idx}_env{env_id}.png")
+    title = f"{task_env} run {run_idx} env {env_id} EE path (XY)"
+    plot_ee_path_xy(ee_position, title=title, image_path=image_path)
+    return image_path
+
+
 def summarize_run(
     *,
     env_results: list[dict],
@@ -200,12 +224,27 @@ def summarize_run(
 
     dt = env_cfg.sim.dt * env_cfg.decimation
     hdf5_path = os.path.join(scene_output_dir, f"run_{run_idx}.hdf5")
+    experiment_output_dir = os.path.dirname(episode_results_file)
 
     for r in env_results:
         env_id = r["env_id"]
         traj_data = load_demo_data(hdf5_path, f"demo_{env_id}")
         traj_metrics = compute_episode_metrics(traj_data, dt=dt) if traj_data else None
         final_info = final_infos[env_id] if final_infos else None
+        ee_path_xy_plot = save_ee_path_xy_plot(
+            traj_data=traj_data,
+            task_env=task_env,
+            run_idx=run_idx,
+            env_id=env_id,
+            scene_output_dir=scene_output_dir,
+        )
+
+        merged_extra_fields = dict(extra_fields or {})
+        if ee_path_xy_plot is not None:
+            merged_extra_fields["ee_path_xy_plot"] = os.path.relpath(
+                ee_path_xy_plot,
+                experiment_output_dir,
+            )
 
         run_summary = build_run_summary(
             env_result=r,
@@ -225,7 +264,7 @@ def summarize_run(
             instruction_type=instruction_type,
             timing=timing,
             task_name=task_name,
-            extra_fields=extra_fields,
+            extra_fields=merged_extra_fields or None,
         )
 
         episode_results = update_experiment_results(
