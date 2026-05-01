@@ -32,6 +32,7 @@ class Pi0DroidJointposClient(InferenceClient):
         open_loop_horizon: int | None = None,
         remote_uri: str | None = None,
         policy_variant: str = "pi05",
+        sdf_builder=None,
     ) -> None:
         super().__init__()
         if open_loop_horizon is None:
@@ -42,6 +43,11 @@ class Pi0DroidJointposClient(InferenceClient):
         self._remote_host = remote_host
         self._remote_port = remote_port
         self._display = remote_uri if remote_uri is not None else f"{remote_host}:{remote_port}"
+        # Optional :class:`robolab_policy_client.sdf.SDFBuilder`. When set,
+        # ``_pack_request`` attaches per-replan SDF tensors (``fkc/*`` keys)
+        # to the websocket payload so the openpi server's FKC guidance has
+        # an up-to-date scene SDF. Must already be ``start()``-ed.
+        self.sdf_builder = sdf_builder
 
         print(f"[{self.__class__.__name__}] Awaiting for server on {self._display} to be ready...")
         self.client = self._connect()
@@ -93,7 +99,7 @@ class Pi0DroidJointposClient(InferenceClient):
         }
 
     def _pack_request(self, extracted_obs: dict, instruction: str) -> dict:
-        return {
+        request = {
             "observation/exterior_image_1_left": image_tools.resize_with_pad(
                 extracted_obs["right_image"], 224, 224
             ),
@@ -104,6 +110,22 @@ class Pi0DroidJointposClient(InferenceClient):
             "observation/gripper_position": extracted_obs["gripper_position"],
             "prompt": instruction,
         }
+        if self.sdf_builder is not None:
+            # Built once per replan (= each ``_pack_request`` call). The
+            # SDF mirrors RoboLab's IsaacLab scene state, with the currently
+            # grasped object excluded so the policy can manipulate it freely.
+            # The builder holds its own ``WorldState`` reference (set by
+            # run_eval.py via ``set_world``) — we never go through the
+            # ``get_world()`` global cache here, because passing ``None``
+            # to it would silently overwrite the cached world with a
+            # ``WorldState(None)``.
+            try:
+                fkc_extras = self.sdf_builder.build()
+            except Exception:
+                logger.exception("SDFBuilder.build failed; sending request without SDF")
+            else:
+                request.update(fkc_extras)
+        return request
 
     def _query_server(self, request: dict) -> dict:
         return self._infer_with_retry(request)

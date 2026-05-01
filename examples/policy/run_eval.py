@@ -81,6 +81,19 @@ parser.add_argument("--instruction-type", "--instruction_type", type=str, defaul
 parser.add_argument("--video-mode", "--video_mode", type=str, default="all",
                     choices=["all", "viewport", "sensor", "none"],
                     help="Which videos to save: 'all' (sensor + viewport), 'viewport' only, 'sensor' only, or 'none' (default: all)")
+parser.add_argument("--enable-sdf-guidance", "--enable_sdf_guidance", action="store_true",
+                    help="Spawn the nvblox sidecar and attach an ESDF voxel grid to each "
+                         "policy request as fkc/* keys (required when the openpi server is "
+                         "configured with FKC mode != vanilla).")
+parser.add_argument("--nvblox-sidecar-python", "--nvblox_sidecar_python", type=str,
+                    default=os.path.join(os.getcwd(), ".venv_nvblox_sidecar/bin/python"),
+                    help="Path to the python interpreter that has nvblox_torch installed "
+                         "(default: ./.venv_nvblox_sidecar/bin/python).")
+parser.add_argument("--sdf-voxel-size", "--sdf_voxel_size", type=float, default=0.025,
+                    help="Voxel size in metres for the SDF grid (default: 0.025).")
+parser.add_argument("--sdf-safety-margin", "--sdf_safety_margin", type=float, default=0.02,
+                    help="Distance in metres below which the openpi-side SDF hinge fires "
+                         "(default: 0.02).")
 # parse the arguments
 args_cli, _= parser.parse_known_args()
 args_cli.enable_cameras = True
@@ -163,6 +176,39 @@ def main():
             instruction_type=args_cli.instruction_type,
             policy=args_cli.policy)
 
+        # Optionally spin up the nvblox sidecar + SDFBuilder for FKC guidance.
+        # Done after create_env so the world singleton is populated.
+        sdf_builder = None
+        if args_cli.enable_sdf_guidance:
+            from robolab.core.world.world_state import get_world
+            from robolab_policy_client.sdf import SDFBuilder
+            from robolab_policy_client.sdf.builder import (
+                SDFBuilderConfig,
+                WorkspaceGrid,
+            )
+
+            world = get_world(env)  # ensure cache is populated
+            obstacle_names = tuple(world.objects.keys())
+            # Workspace bounds: prefer task-declared if present, else fall
+            # back to a Franka-tabletop default (~1m cube in front of base).
+            task_cls = type(env_cfg)
+            bounds = getattr(task_cls, "sdf_workspace_bounds", None)
+            if bounds is None:
+                bounds = ((-0.2, -0.6, -0.05), (0.8, 0.6, 1.2))
+            workspace = WorkspaceGrid.from_bounds(bounds, args_cli.sdf_voxel_size)
+            sdf_cfg = SDFBuilderConfig(
+                sidecar_python=args_cli.nvblox_sidecar_python,
+                workspace=workspace,
+                obstacle_object_names=obstacle_names,
+                safety_margin=args_cli.sdf_safety_margin,
+            )
+            sdf_builder = SDFBuilder(sdf_cfg).start()
+            sdf_builder.set_world(world)
+            print(
+                f"\033[96m[RoboLab] SDF guidance ON: voxel={workspace.voxel_size}m, "
+                f"dims={workspace.grid_dims}, obstacles={obstacle_names}\033[0m"
+            )
+
         # Construct the inference client once per task; reuse across runs.
         # CLI values of None are filtered out by create_client so the
         # client's own defaults apply.
@@ -172,6 +218,7 @@ def main():
             remote_port=args_cli.remote_port,
             remote_uri=args_cli.remote_uri,
             open_loop_horizon=args_cli.open_loop_horizon,
+            sdf_builder=sdf_builder,
         )
 
         for run_idx in range(num_runs):
@@ -218,6 +265,8 @@ def main():
             # Reset eval state for next run (unfreeze all envs)
             env.reset_eval_state()
 
+        if sdf_builder is not None:
+            sdf_builder.close()
         env.close()
 
     # This will print the results to the terminal, summarized.

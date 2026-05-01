@@ -34,6 +34,11 @@ class BananaInBowlTask(Task):
     episode_length_s: int = 50
     attributes = ['semantics']
 
+    # Workspace AABB consumed by ``robolab_policy_client.sdf.SDFBuilder`` to
+    # set the ESDF voxel grid. Sized to comfortably contain the table, bowl,
+    # banana and the Franka's reach without inflating voxel count.
+    sdf_workspace_bounds = ((-0.2, -0.6, -0.05), (0.8, 0.6, 1.2))
+
     # Updated to use new clean API
     subtasks = [
         pick_and_place(

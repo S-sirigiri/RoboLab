@@ -33,6 +33,11 @@ class FruitsGreenLimesOnPlateTask(Task):
     episode_length_s: int = 90
     attributes = ['color']
 
+    # Workspace AABB consumed by ``robolab_policy_client.sdf.SDFBuilder``.
+    # Slightly larger than BananaInBowl to accommodate the spread of fruit
+    # and the storage box.
+    sdf_workspace_bounds = ((-0.3, -0.7, -0.05), (0.9, 0.7, 1.2))
+
     subtasks = [
         pick_and_place_on_surface(
             object=["lime01", "lime01_01"],
