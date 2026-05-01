@@ -128,6 +128,22 @@ def run_episode(env, env_cfg, episode, client: InferenceClient, *, headless=Fals
             kit_app.update()
 
         timer.start("policy_inference")
+        # Optional batched precompute hook: lets a client (e.g. the FKC
+        # SDF-aware Pi0 client) do one bulk build across every env that
+        # needs a replan, instead of N sequential builds inside the
+        # per-env infer loop below. ``getattr`` keeps this fully opt-in
+        # for clients that don't implement the hook.
+        precompute = getattr(client, "precompute_sdf_batch", None)
+        if callable(precompute):
+            try:
+                precompute(list(env.active_env_ids))
+            except Exception:
+                # Don't let a precompute failure abort the rollout; the
+                # per-env path is still able to fall back synchronously.
+                import logging
+                logging.getLogger(__name__).exception(
+                    "precompute_sdf_batch failed; per-env clients will fall back."
+                )
         # Infer actions for all active (non-frozen) envs
         actions = torch.zeros(env.num_envs, action_dim, device=env.device)
         last_viz = None

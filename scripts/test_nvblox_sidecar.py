@@ -67,41 +67,46 @@ def _check_sidecar_venv(sidecar_py: str) -> None:
     print(f"      nvblox_torch import OK; CUDA available: {res.stdout.strip()}")
 
 
-def _query_sphere(proto, proc, voxel_size: float = 0.05) -> np.ndarray:
+def _query_sphere(proto, proc, voxel_size: float = 0.05) -> dict:
+    """Single-scene batched request: 1 element in 'scenes'."""
     req = {
         "voxel_size": voxel_size,
         "aabb_min": [-1.0, -1.0, -1.0],
         "aabb_max": [1.0, 1.0, 1.0],
         "grid_origin": [-0.5, -0.5, -0.5],
         "grid_dims": [20, 20, 20],
-        "primitives": [{"type": "sphere", "params": [0.0, 0.0, 0.0, 0.1]}],
         "max_esdf_distance_m": 5.0,
+        "scenes": [
+            {"primitives": [{"type": "sphere", "params": [0.0, 0.0, 0.0, 0.1]}]},
+        ],
     }
     proto.write_msg(proc.stdin, req)
     return proto.read_msg(proc.stdout)
 
 
-def _query_tabletop(proto, proc) -> tuple[dict, dict]:
-    """Run a 3-cube scene (table + bowl + banana) and the same scene with
-    the banana removed. Returns (full_resp, grasped_resp)."""
+def _query_tabletop_batch(proto, proc) -> dict:
+    """Batched 2-scene request: full tabletop AND grasped (banana removed)
+    in one IPC. Mirrors what the eval loop does on a multi-env step where
+    env 0 is mid-grasp and env 1 isn't."""
     primitives_full = [
         {"type": "cube", "params": [0.4, 0.0, -0.025, 0.6, 0.6, 0.05]},   # table
         {"type": "cube", "params": [0.5, -0.1, 0.05, 0.15, 0.15, 0.10]},  # bowl AABB
-        {"type": "cube", "params": [0.45, 0.1, 0.10, 0.20, 0.20, 0.20]},  # large banana stand-in
+        {"type": "cube", "params": [0.45, 0.1, 0.10, 0.20, 0.20, 0.20]},  # banana stand-in
     ]
-    base = {
+    req = {
         "voxel_size": 0.025,
         "aabb_min": [-0.2, -0.6, -0.05],
         "aabb_max": [0.8, 0.6, 1.2],
         "grid_origin": [-0.2, -0.6, -0.05],
         "grid_dims": [40, 48, 50],
         "max_esdf_distance_m": 5.0,
+        "scenes": [
+            {"primitives": primitives_full},        # env 0: pre-grasp
+            {"primitives": primitives_full[:2]},    # env 1: banana grasped
+        ],
     }
-    proto.write_msg(proc.stdin, dict(base, primitives=primitives_full))
-    full = proto.read_msg(proc.stdout)
-    proto.write_msg(proc.stdin, dict(base, primitives=primitives_full[:2]))
-    grasped = proto.read_msg(proc.stdout)
-    return full, grasped
+    proto.write_msg(proc.stdin, req)
+    return proto.read_msg(proc.stdout)
 
 
 def main() -> int:
@@ -118,14 +123,16 @@ def main() -> int:
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=sys.stderr,
     )
     try:
-        # --- Sphere check
+        # --- Sphere check (1-scene batch)
         t0 = time.time()
         resp = _query_sphere(proto, proc)
         cold_ms = (time.time() - t0) * 1000
         if "error" in resp:
             raise SystemExit(f"FAIL: sidecar errored on first request:\n{resp['error']}")
-        sdf = resp["sdf"]
-        sdf_at_origin = float(sdf[10, 10, 10])  # voxel center at world (0, 0, 0)
+        sdfs = resp["sdfs"]
+        if sdfs.shape[0] != 1:
+            raise SystemExit(f"FAIL: expected 1 SDF, got {sdfs.shape[0]}")
+        sdf_at_origin = float(sdfs[0, 10, 10, 10])  # voxel center at world (0, 0, 0)
         if not (-0.15 < sdf_at_origin < 0.0):
             raise SystemExit(
                 f"FAIL: sphere SDF at origin = {sdf_at_origin:.4f}, "
@@ -134,27 +141,32 @@ def main() -> int:
         print(f"[3/4] sphere SDF correct: at origin={sdf_at_origin:+.4f} m, "
               f"cold-build={cold_ms:.0f} ms, hot-build={resp['build_ms']:.0f} ms")
 
-        # --- 3-cube tabletop with grasp simulation
+        # --- Batched 2-scene tabletop (mid-grasp + pre-grasp in ONE IPC)
         t_full = time.time()
-        full, grasped = _query_tabletop(proto, proc)
+        resp = _query_tabletop_batch(proto, proc)
         latency_ms = (time.time() - t_full) * 1000
-        # Banana centre voxel
+        if "error" in resp:
+            raise SystemExit(f"FAIL: sidecar errored on batch request:\n{resp['error']}")
+        sdfs = resp["sdfs"]
+        if sdfs.shape[0] != 2:
+            raise SystemExit(f"FAIL: expected 2 SDFs in batch, got {sdfs.shape[0]}")
+        # Banana centre voxel (same world coords for both envs)
         banana_world = np.array([0.45, 0.1, 0.1])
         origin = np.array([-0.2, -0.6, -0.05])
         ijk = tuple(((banana_world - origin) / 0.025).astype(int))
-        sdf_full = float(full["sdf"][ijk])
-        sdf_grasped = float(grasped["sdf"][ijk])
+        sdf_full = float(sdfs[0][ijk])
+        sdf_grasped = float(sdfs[1][ijk])
         if not (sdf_full < 0):
-            raise SystemExit(f"FAIL: full-scene SDF inside banana = {sdf_full:.3f}, expected < 0")
+            raise SystemExit(f"FAIL: env0 (with banana) SDF = {sdf_full:.3f}, expected < 0")
         if not (sdf_grasped > 0):
-            raise SystemExit(f"FAIL: grasped-scene SDF where banana was = {sdf_grasped:.3f}, expected > 0")
-        print(f"[4/4] grasp exclusion correct: with banana={sdf_full:+.3f} m, "
-              f"without banana={sdf_grasped:+.3f} m; "
-              f"2× build round-trip={latency_ms:.0f} ms")
+            raise SystemExit(f"FAIL: env1 (banana grasped) SDF = {sdf_grasped:.3f}, expected > 0")
+        print(f"[4/4] batched grasp exclusion correct: env0 (banana in scene)={sdf_full:+.3f} m, "
+              f"env1 (banana grasped)={sdf_grasped:+.3f} m; "
+              f"2-scene batched build={latency_ms:.0f} ms (sidecar build={resp['build_ms']:.0f} ms)")
 
         if latency_ms > 500:
             print(
-                f"WARNING: hot-path latency is high ({latency_ms:.0f} ms for 2 builds). "
+                f"WARNING: batched hot-path latency is high ({latency_ms:.0f} ms for 2 envs). "
                 "Expected <200 ms; check GPU utilisation."
             )
 

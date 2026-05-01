@@ -84,16 +84,28 @@ parser.add_argument("--video-mode", "--video_mode", type=str, default="all",
 parser.add_argument("--enable-sdf-guidance", "--enable_sdf_guidance", action="store_true",
                     help="Spawn the nvblox sidecar and attach an ESDF voxel grid to each "
                          "policy request as fkc/* keys (required when the openpi server is "
-                         "configured with FKC mode != vanilla).")
+                         "configured with FKC mode != vanilla). Multi-env runs build all "
+                         "envs' SDFs in a single batched IPC roundtrip per step.")
 parser.add_argument("--nvblox-sidecar-python", "--nvblox_sidecar_python", type=str,
                     default=os.path.join(os.getcwd(), ".venv_nvblox_sidecar/bin/python"),
                     help="Path to the python interpreter that has nvblox_torch installed "
                          "(default: ./.venv_nvblox_sidecar/bin/python).")
 parser.add_argument("--sdf-voxel-size", "--sdf_voxel_size", type=float, default=0.025,
-                    help="Voxel size in metres for the SDF grid (default: 0.025).")
-parser.add_argument("--sdf-safety-margin", "--sdf_safety_margin", type=float, default=0.02,
-                    help="Distance in metres below which the openpi-side SDF hinge fires "
-                         "(default: 0.02).")
+                    help="Voxel size in metres for the SDF grid (default: 0.025). Smaller "
+                         "= more accurate SDF, more voxels and longer build time.")
+parser.add_argument("--sdf-grasp-force-threshold", "--sdf_grasp_force_threshold",
+                    type=float, default=0.1,
+                    help="Contact force (N) above which a scene object is treated as "
+                         "currently grasped and dropped from the obstacle SDF "
+                         "(default: 0.1).")
+parser.add_argument("--sdf-aabb-padding", "--sdf_aabb_padding", type=float, default=0.0,
+                    help="Pad each obstacle's world-axis AABB by this many metres on every "
+                         "side. Useful when objects are thinner than one voxel — set to "
+                         "~voxel_size for a conservative wrap (default: 0.0).")
+parser.add_argument("--sdf-max-esdf-distance", "--sdf_max_esdf_distance",
+                    type=float, default=5.0,
+                    help="Truncation distance (m) used by nvblox; voxels farther than this "
+                         "from any obstacle report this value (default: 5.0).")
 # parse the arguments
 args_cli, _= parser.parse_known_args()
 args_cli.enable_cameras = True
@@ -200,7 +212,9 @@ def main():
                 sidecar_python=args_cli.nvblox_sidecar_python,
                 workspace=workspace,
                 obstacle_object_names=obstacle_names,
-                safety_margin=args_cli.sdf_safety_margin,
+                grasp_force_threshold=args_cli.sdf_grasp_force_threshold,
+                aabb_padding=args_cli.sdf_aabb_padding,
+                max_esdf_distance_m=args_cli.sdf_max_esdf_distance,
             )
             sdf_builder = SDFBuilder(sdf_cfg).start()
             sdf_builder.set_world(world)

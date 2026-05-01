@@ -44,14 +44,44 @@ class Pi0DroidJointposClient(InferenceClient):
         self._remote_port = remote_port
         self._display = remote_uri if remote_uri is not None else f"{remote_host}:{remote_port}"
         # Optional :class:`robolab_policy_client.sdf.SDFBuilder`. When set,
-        # ``_pack_request`` attaches per-replan SDF tensors (``fkc/*`` keys)
-        # to the websocket payload so the openpi server's FKC guidance has
-        # an up-to-date scene SDF. Must already be ``start()``-ed.
+        # the eval loop calls :meth:`precompute_sdf_batch` once per step
+        # *before* the per-env infer loop, populating ``_sdf_cache`` with
+        # one SDF per env that needs a replan. ``_pack_request`` then just
+        # pops the cached SDF — no per-env IPC.
         self.sdf_builder = sdf_builder
+        # env_id -> dict of fkc/* arrays (consumed by next ``_pack_request``).
+        self._sdf_cache: dict[int, dict] = {}
 
         print(f"[{self.__class__.__name__}] Awaiting for server on {self._display} to be ready...")
         self.client = self._connect()
         print(f"[{self.__class__.__name__}] Connected to {self._display}.")
+
+    def precompute_sdf_batch(self, env_ids) -> None:
+        """Build SDFs for all ``env_ids`` that need a replan, in one IPC.
+
+        Called by the eval loop once per env step *before* the per-env
+        ``infer`` loop. Filters ``env_ids`` down to those that actually
+        need a fresh action chunk via :meth:`_needs_refresh`, then issues
+        a single batched sidecar request that produces one SDF per env.
+
+        No-op when ``self.sdf_builder is None`` so non-SDF backends and
+        baseline runs pay no cost.
+        """
+        if self.sdf_builder is None:
+            return
+        refresh_ids = [int(eid) for eid in env_ids if self._needs_refresh(int(eid))]
+        if not refresh_ids:
+            return
+        try:
+            results = self.sdf_builder.build_batch(refresh_ids)
+        except Exception:
+            logger.exception(
+                "SDFBuilder.build_batch failed for env_ids=%s; falling back to "
+                "no-SDF requests this step.", refresh_ids,
+            )
+            return
+        for eid, result in zip(refresh_ids, results):
+            self._sdf_cache[eid] = result
 
     def _connect(self):
         if self._remote_uri is not None:
@@ -96,6 +126,7 @@ class Pi0DroidJointposClient(InferenceClient):
             "wrist_image": wrist_image,
             "joint_position": joint_position,
             "gripper_position": gripper_position,
+            "_env_id": env_id,  # threaded through to _pack_request for SDF cache lookup
         }
 
     def _pack_request(self, extracted_obs: dict, instruction: str) -> dict:
@@ -111,19 +142,23 @@ class Pi0DroidJointposClient(InferenceClient):
             "prompt": instruction,
         }
         if self.sdf_builder is not None:
-            # Built once per replan (= each ``_pack_request`` call). The
-            # SDF mirrors RoboLab's IsaacLab scene state, with the currently
-            # grasped object excluded so the policy can manipulate it freely.
-            # The builder holds its own ``WorldState`` reference (set by
-            # run_eval.py via ``set_world``) — we never go through the
-            # ``get_world()`` global cache here, because passing ``None``
-            # to it would silently overwrite the cached world with a
-            # ``WorldState(None)``.
-            try:
-                fkc_extras = self.sdf_builder.build()
-            except Exception:
-                logger.exception("SDFBuilder.build failed; sending request without SDF")
-            else:
+            # Pop the per-env SDF that was precomputed for this step by
+            # ``precompute_sdf_batch``. If the eval loop forgot to call it
+            # (e.g. an older driver or an interactive REPL), fall back to a
+            # single-env synchronous build so behaviour is still correct,
+            # just slower.
+            env_id = int(extracted_obs.get("_env_id", 0))
+            fkc_extras = self._sdf_cache.pop(env_id, None)
+            if fkc_extras is None:
+                try:
+                    fkc_extras = self.sdf_builder.build(env_id=env_id)
+                except Exception:
+                    logger.exception(
+                        "SDFBuilder.build failed for env_id=%d; sending request without SDF",
+                        env_id,
+                    )
+                    fkc_extras = None
+            if fkc_extras is not None:
                 request.update(fkc_extras)
         return request
 
