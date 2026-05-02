@@ -106,6 +106,16 @@ parser.add_argument("--sdf-max-esdf-distance", "--sdf_max_esdf_distance",
                     type=float, default=5.0,
                     help="Truncation distance (m) used by nvblox; voxels farther than this "
                          "from any obstacle report this value (default: 5.0).")
+parser.add_argument("--sdf-ooi-exclusion-mode", "--sdf_ooi_exclusion_mode",
+                    type=str, choices=["dynamic", "static"], default="dynamic",
+                    help="How object-of-interest (OOI) collision exclusion is handled. "
+                         "'dynamic' (default): OOI is an obstacle until the gripper grasps "
+                         "it, then auto-excluded by contact force. 'static': declared OOIs "
+                         "are always excluded from the SDF, regardless of grasp.")
+parser.add_argument("--sdf-ooi-object-names", "--sdf_ooi_object_names",
+                    nargs="*", default=None,
+                    help="Override the task's ooi_object_names. Only consulted when "
+                         "--sdf_ooi_exclusion_mode=static. Pass with no values to clear.")
 parser.add_argument("--report-collisions", "--report_collisions", action="store_true",
                     help="Per-step ground-truth collision logging using IsaacLab body "
                          "positions vs scene-object OBBs. Currently grasped objects are "
@@ -230,6 +240,11 @@ def main():
             if bounds is None:
                 bounds = ((-0.2, -0.6, -0.05), (0.8, 0.6, 1.2))
             workspace = WorkspaceGrid.from_bounds(bounds, args_cli.sdf_voxel_size)
+            ooi_names = (
+                tuple(args_cli.sdf_ooi_object_names)
+                if args_cli.sdf_ooi_object_names is not None
+                else tuple(getattr(task_cls, "ooi_object_names", None) or ())
+            )
             sdf_cfg = SDFBuilderConfig(
                 sidecar_python=args_cli.nvblox_sidecar_python,
                 workspace=workspace,
@@ -237,12 +252,15 @@ def main():
                 grasp_force_threshold=args_cli.sdf_grasp_force_threshold,
                 aabb_padding=args_cli.sdf_aabb_padding,
                 max_esdf_distance_m=args_cli.sdf_max_esdf_distance,
+                ooi_exclusion_mode=args_cli.sdf_ooi_exclusion_mode,
+                ooi_object_names=ooi_names,
             )
             sdf_builder = SDFBuilder(sdf_cfg).start()
             sdf_builder.set_world(world)
             print(
                 f"\033[96m[RoboLab] SDF guidance ON: voxel={workspace.voxel_size}m, "
-                f"dims={workspace.grid_dims}, obstacles={obstacle_names}\033[0m"
+                f"dims={workspace.grid_dims}, obstacles={obstacle_names}, "
+                f"ooi_mode={args_cli.sdf_ooi_exclusion_mode}, ooi={ooi_names}\033[0m"
             )
 
         # Construct the inference client once per task; reuse across runs.

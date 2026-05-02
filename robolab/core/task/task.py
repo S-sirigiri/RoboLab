@@ -27,6 +27,7 @@ class Task:
     events: Any = None  # Optional event terms (e.g., randomization)
     subtasks: Any = None  # Subtasks for completion tracking
     contact_object_list: list[str] | None = None  # list of objects that can be in contact with the robot and will be tracked for contact sensors
+    ooi_object_names: list[str] | None = None  # objects of interest (those being manipulated/grasped). Consumed by SDFBuilder when running in 'static' OOI exclusion mode.
 
     episode_length_s: int = 60*10 # 10 minutes
     attributes: list[str] = None
@@ -75,6 +76,20 @@ def verify_task_valid(task_class: type[Task]) -> tuple[bool, str]:
     if not contact_list_valid:
         error = f"Contact list is not valid: {error}"
         return False, error
+
+    # Cross-check: every ooi_object_names entry must appear in contact_object_list.
+    if task_class.ooi_object_names:
+        missing_ooi = [
+            n for n in task_class.ooi_object_names
+            if n not in task_class.contact_object_list
+        ]
+        if missing_ooi:
+            error = (
+                f"Task class {task_class.__name__} has ooi_object_names "
+                f"{missing_ooi} that are not in contact_object_list "
+                f"{task_class.contact_object_list}."
+            )
+            return False, error
 
     # Check terminations
     terminations = task_class.terminations()

@@ -134,6 +134,35 @@ class SDFBuilderConfig:
 
     sidecar_args: tuple[str, ...] = field(default_factory=tuple)
 
+    ooi_exclusion_mode: str = "dynamic"
+    """How object-of-interest (OOI) collision exclusion is handled.
+
+    - ``"dynamic"``: OOI is treated as an obstacle until the gripper
+      contact force exceeds :attr:`grasp_force_threshold`, then excluded
+      automatically by the contact-sensor safety net (current behavior).
+    - ``"static"``: every name in :attr:`ooi_object_names` is *always*
+      excluded from the SDF, regardless of grasp state. Non-OOI
+      obstacles still get the dynamic grasp safety net.
+    """
+
+    ooi_object_names: tuple[str, ...] = ()
+    """Per-task object-of-interest names — the objects being
+    manipulated/grasped. Consulted only when
+    :attr:`ooi_exclusion_mode` is ``"static"``."""
+
+    def __post_init__(self) -> None:
+        valid_modes = {"dynamic", "static"}
+        if self.ooi_exclusion_mode not in valid_modes:
+            raise ValueError(
+                f"SDFBuilderConfig.ooi_exclusion_mode must be one of "
+                f"{sorted(valid_modes)}, got {self.ooi_exclusion_mode!r}"
+            )
+        if self.ooi_exclusion_mode == "static" and not self.ooi_object_names:
+            logger.warning(
+                "SDFBuilderConfig: ooi_exclusion_mode='static' but "
+                "ooi_object_names is empty; behavior reduces to 'dynamic'."
+            )
+
 
 class SDFBuilder:
     """Per-replan workspace ESDF generator with batched multi-env support.
@@ -279,9 +308,18 @@ class SDFBuilder:
             grasped_per_env[eid] = grasped
 
         # ----- assemble per-env primitives lists --------------------------
+        static_ooi_excluded: set[str] = (
+            set(self.cfg.ooi_object_names)
+            if self.cfg.ooi_exclusion_mode == "static"
+            else set()
+        )
         scenes_payload = []
         for eid in env_ids:
-            excluded = grasped_per_env[eid] | set(explicit.get(eid, ()))
+            excluded = (
+                grasped_per_env[eid]
+                | set(explicit.get(eid, ()))
+                | static_ooi_excluded
+            )
             primitives = []
             for j, name in enumerate(names):
                 if name in excluded:

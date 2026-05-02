@@ -24,6 +24,7 @@ class BananaInBowlTerminations:
 @dataclass
 class BananaInBowlTask(Task):
     contact_object_list = ["banana", "bowl", "table"]
+    ooi_object_names = ["banana"]
     scene = import_scene("banana_bowl.usda", contact_object_list)
     terminations = BananaInBowlTerminations
     instruction = {
