@@ -53,7 +53,8 @@ from robolab.core.world.world_state import get_world
 from robolab.eval.base_client import InferenceClient
 
 
-def run_episode(env, env_cfg, episode, client: InferenceClient, *, headless=False, save_videos=True, video_mode="all"):
+def run_episode(env, env_cfg, episode, client: InferenceClient, *, headless=False, save_videos=True, video_mode="all",
+                collision_reporter=None, collision_output_path: str | None = None):
     """Run a policy-controlled episode across all parallel envs.
 
     The policy client is constructed by the caller (typically via
@@ -68,6 +69,12 @@ def run_episode(env, env_cfg, episode, client: InferenceClient, *, headless=Fals
         headless: If True, don't display video
         save_videos: If True, save per-env episode videos
         video_mode: Which videos to save: 'all', 'viewport', 'sensor', or 'none'
+        collision_reporter: Optional :class:`robolab.eval.collision_reporter.CollisionReporter`.
+            When provided, ``log_step`` is called once per sim step and the
+            buffer is flushed to ``collision_output_path`` at the end of the
+            episode. Pure ground-truth check; cheap (<5 ms / step typical).
+        collision_output_path: Where to write the per-run ``.npz`` if a reporter
+            is supplied. Required iff ``collision_reporter is not None``.
 
     Returns:
         tuple: (env_results, subtask_status, timing)
@@ -165,6 +172,19 @@ def run_episode(env, env_cfg, episode, client: InferenceClient, *, headless=Fals
         obs, reward, term, trunc, info = env.step(actions)
         timer.stop("env_step")
 
+        # Cheap ground-truth collision logging using the post-step physics
+        # state. Buffered in RAM; never blocks the rollout on disk I/O.
+        if collision_reporter is not None:
+            try:
+                collision_reporter.log_step(step, list(env.active_env_ids))
+            except Exception:
+                import logging
+                logging.getLogger(__name__).exception(
+                    "CollisionReporter.log_step failed at step %d; "
+                    "continuing without further logging.", step,
+                )
+                collision_reporter = None
+
         # Collect per-env subtask info (list of dicts, one per env)
         per_env_infos = get_all_env_subtask_infos(env)
         subtask_status.append(per_env_infos)
@@ -192,6 +212,16 @@ def run_episode(env, env_cfg, episode, client: InferenceClient, *, headless=Fals
     if save_videos:
         for vw in video_writers_obs + video_writers_viewport:
             vw.release()
+
+    if collision_reporter is not None and collision_output_path:
+        try:
+            collision_reporter.flush(collision_output_path)
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception(
+                "CollisionReporter.flush(%s) failed; collision data may be lost.",
+                collision_output_path,
+            )
 
     client.reset()
 

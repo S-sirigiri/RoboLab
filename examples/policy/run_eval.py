@@ -106,6 +106,28 @@ parser.add_argument("--sdf-max-esdf-distance", "--sdf_max_esdf_distance",
                     type=float, default=5.0,
                     help="Truncation distance (m) used by nvblox; voxels farther than this "
                          "from any obstacle report this value (default: 5.0).")
+parser.add_argument("--report-collisions", "--report_collisions", action="store_true",
+                    help="Per-step ground-truth collision logging using IsaacLab body "
+                         "positions vs scene-object OBBs. Currently grasped objects are "
+                         "automatically excluded. One compressed .npz is written per run.")
+parser.add_argument("--collision-body-radius", "--collision_body_radius", type=float, default=0.045,
+                    help="Robot-link sphere radius (m) used by the collision reporter to "
+                         "decide overlap (default: 0.045 ≈ Franka link half-width).")
+parser.add_argument("--collision-obstacle-padding", "--collision_obstacle_padding",
+                    type=float, default=0.0,
+                    help="Pad each obstacle's world-axis AABB by this many metres on every "
+                         "side when checking collisions (default: 0.0).")
+parser.add_argument("--collision-grasp-force-threshold", "--collision_grasp_force_threshold",
+                    type=float, default=0.1,
+                    help="Contact force above which an object is treated as 'grasped' "
+                         "and excluded from the collision check (default: 0.1).")
+parser.add_argument("--collision-robot-articulation", "--collision_robot_articulation",
+                    type=str, default="robot",
+                    help="Key under WorldState.articulations whose links count as 'robot' "
+                         "for the reporter (default: 'robot').")
+parser.add_argument("--collision-body-filter", "--collision_body_filter", nargs="*", default=None,
+                    help="Optional list of substrings; only robot bodies whose name contains "
+                         "one of these are checked. Useful to skip internal joint stubs.")
 # parse the arguments
 args_cli, _= parser.parse_known_args()
 args_cli.enable_cameras = True
@@ -235,6 +257,39 @@ def main():
             sdf_builder=sdf_builder,
         )
 
+        # Optional ground-truth collision reporter. Independent of the FKC
+        # SDF — uses IsaacLab body positions and ``world.get_bbox``. Cheap
+        # per step (<5 ms on a typical scene) and only flushes to disk at
+        # episode end.
+        collision_reporter = None
+        if args_cli.report_collisions:
+            from robolab.core.world.world_state import get_world
+            from robolab.eval.collision_reporter import (
+                CollisionReporter,
+                CollisionReporterConfig,
+            )
+
+            world_for_reporter = get_world(env)
+            obstacle_names_reporter = tuple(world_for_reporter.objects.keys())
+            collision_reporter = CollisionReporter(
+                world_for_reporter,
+                CollisionReporterConfig(
+                    obstacle_names=obstacle_names_reporter,
+                    robot_articulation_name=args_cli.collision_robot_articulation,
+                    body_radius_m=args_cli.collision_body_radius,
+                    obstacle_padding_m=args_cli.collision_obstacle_padding,
+                    grasp_force_threshold=args_cli.collision_grasp_force_threshold,
+                    body_filter=tuple(args_cli.collision_body_filter)
+                    if args_cli.collision_body_filter
+                    else None,
+                ),
+            )
+            print(
+                f"\033[96m[RoboLab] Collision reporting ON: obstacles={obstacle_names_reporter}, "
+                f"robot_bodies={len(collision_reporter._body_names)}, "
+                f"body_radius={args_cli.collision_body_radius}m\033[0m"
+            )
+
         for run_idx in range(num_runs):
 
             # Check if all episodes in this run are already complete
@@ -250,13 +305,34 @@ def main():
                 run_name = task_env + f"_{run_idx}"
             print(f"\033[96m[RoboLab] Running {run_name}: '{env_cfg.instruction}' (run {run_idx}, {num_envs} envs)\033[0m")
 
+            collision_npz_path = None
+            if collision_reporter is not None:
+                collision_npz_path = os.path.join(
+                    scene_output_dir, f"collisions_run_{run_idx}.npz"
+                )
+
             env_results, msgs, timing = run_episode(env=env,
                         env_cfg=env_cfg,
                         episode=run_idx,
                         client=client,
                         save_videos=args_cli.save_videos,
                         video_mode=args_cli.video_mode,
-                        headless=args_cli.headless)
+                        headless=args_cli.headless,
+                        collision_reporter=collision_reporter,
+                        collision_output_path=collision_npz_path)
+
+            if collision_reporter is not None:
+                summary = collision_reporter.summarize()
+                if summary:
+                    line = ", ".join(
+                        f"env{eid}: {s['steps_in_collision']}/{s['steps_total']} "
+                        f"steps ({s['fraction_in_collision']*100:.1f}%), "
+                        f"min_clearance={s['min_clearance_m']*1000:.1f}mm"
+                        for eid, s in sorted(summary.items())
+                    )
+                    print(f"\033[96m[RoboLab] Collisions {run_name}: {line}\033[0m")
+                    if collision_npz_path:
+                        print(f"\033[96m[RoboLab] Collision data → {collision_npz_path}\033[0m")
 
             episode_results = summarize_run(
                 env_results=env_results,
