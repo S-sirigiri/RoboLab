@@ -92,6 +92,12 @@ class CollisionReporterConfig:
     substrings (case-insensitive). Useful to skip e.g. internal joint stubs
     that don't have meaningful geometry. ``None`` = check all bodies."""
 
+    static_excluded_names: tuple[str, ...] = ()
+    """Obstacle names to *always* exclude from the collision check, on top of
+    the per-step grasp-based exclusion. Used to mirror the FKC SDF builder's
+    ``ooi_exclusion_mode='static'`` so reported collisions stay consistent
+    with what the policy was actually being penalised for."""
+
 
 class CollisionReporter:
     """Per-step ground-truth collision logger with episode-end flush."""
@@ -178,18 +184,20 @@ class CollisionReporter:
 
         body_radius = float(self.cfg.body_radius_m)
         obs_pad = float(self.cfg.obstacle_padding_m)
+        static_excluded = set(self.cfg.static_excluded_names)
 
         for eid in env_ids:
             grasped = grasped_per_env[eid]
+            excluded = grasped | static_excluded
             row_pos = body_pos[eid]  # (B, 3)
             # Per-body, per-obstacle clearance:
             # clearance = dist(point, AABB_inflated) - body_radius
             # negative clearance ⇒ overlap. We track the minimum over all
-            # non-grasped obstacles per body.
+            # non-excluded obstacles per body.
             B = row_pos.shape[0]
             best_clearance = np.full((B,), np.inf, dtype=np.float32)
             for j, obs_name in enumerate(self.cfg.obstacle_names):
-                if obs_name in grasped:
+                if obs_name in excluded:
                     continue
                 aabb = obstacle_aabbs[j, eid]
                 if not np.all(np.isfinite(aabb)):

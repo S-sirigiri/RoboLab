@@ -220,6 +220,22 @@ def main():
             instruction_type=args_cli.instruction_type,
             policy=args_cli.policy)
 
+        # Resolve OOI (object-of-interest) names once per task — used by both
+        # the FKC SDF builder and the collision reporter so the two stay in
+        # sync. CLI override beats the task-class default.
+        task_cls = type(env_cfg)
+        ooi_names = (
+            tuple(args_cli.sdf_ooi_object_names)
+            if args_cli.sdf_ooi_object_names is not None
+            else tuple(getattr(task_cls, "ooi_object_names", None) or ())
+        )
+        # Names always excluded from collision/SDF when in 'static' mode.
+        # In 'dynamic' mode this stays empty — the per-step grasp-force
+        # filter on both sides handles OOI exclusion symmetrically.
+        static_excluded_ooi = (
+            ooi_names if args_cli.sdf_ooi_exclusion_mode == "static" else ()
+        )
+
         # Optionally spin up the nvblox sidecar + SDFBuilder for FKC guidance.
         # Done after create_env so the world singleton is populated.
         sdf_builder = None
@@ -235,16 +251,10 @@ def main():
             obstacle_names = tuple(world.objects.keys())
             # Workspace bounds: prefer task-declared if present, else fall
             # back to a Franka-tabletop default (~1m cube in front of base).
-            task_cls = type(env_cfg)
             bounds = getattr(task_cls, "sdf_workspace_bounds", None)
             if bounds is None:
                 bounds = ((-0.2, -0.6, -0.05), (0.8, 0.6, 1.2))
             workspace = WorkspaceGrid.from_bounds(bounds, args_cli.sdf_voxel_size)
-            ooi_names = (
-                tuple(args_cli.sdf_ooi_object_names)
-                if args_cli.sdf_ooi_object_names is not None
-                else tuple(getattr(task_cls, "ooi_object_names", None) or ())
-            )
             sdf_cfg = SDFBuilderConfig(
                 sidecar_python=args_cli.nvblox_sidecar_python,
                 workspace=workspace,
@@ -300,12 +310,15 @@ def main():
                     body_filter=tuple(args_cli.collision_body_filter)
                     if args_cli.collision_body_filter
                     else None,
+                    static_excluded_names=static_excluded_ooi,
                 ),
             )
             print(
                 f"\033[96m[RoboLab] Collision reporting ON: obstacles={obstacle_names_reporter}, "
                 f"robot_bodies={len(collision_reporter._body_names)}, "
-                f"body_radius={args_cli.collision_body_radius}m\033[0m"
+                f"body_radius={args_cli.collision_body_radius}m, "
+                f"ooi_mode={args_cli.sdf_ooi_exclusion_mode}, "
+                f"static_excluded={static_excluded_ooi}\033[0m"
             )
 
         for run_idx in range(num_runs):
