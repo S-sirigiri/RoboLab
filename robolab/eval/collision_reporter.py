@@ -159,6 +159,13 @@ class CollisionReporter:
         except Exception:
             body_pos = np.asarray(body_link_state[..., :3])
         body_pos = body_pos[:, self._body_indices, :]  # (E, B, 3)
+        # WorldState.get_bbox() returns env-relative obstacle boxes by
+        # default. Match that frame before comparing robot body centers.
+        try:
+            origins = self._world.env.scene.env_origins.detach().cpu().numpy()
+        except Exception:
+            origins = np.asarray(self._world.env.scene.env_origins)
+        body_pos = body_pos - origins[:, None, :]
 
         # 2. Per-step grasped objects per env (excluded from collision check).
         grasped_per_env: dict[int, set[str]] = {}
